@@ -66,6 +66,7 @@ from .util import (
     get_uri_scheme,
     infer_vector_column_name,
     join_uri,
+    fetch_remote_files as fetch_remote_files_util,
     value_to_sql,
 )
 from .index import lang_mapping
@@ -643,18 +644,24 @@ class Table(ABC):
         """
         raise NotImplementedError
 
-    def to_pandas(self) -> "pandas.DataFrame":
+    def to_pandas(self, *, fetch_remote_files: bool = False) -> "pandas.DataFrame":
         """Return the table as a pandas DataFrame.
 
         Returns
         -------
         pd.DataFrame
         """
-        return self.to_arrow().to_pandas()
+        return self.to_arrow(fetch_remote_files=fetch_remote_files).to_pandas()
 
     @abstractmethod
-    def to_arrow(self) -> pa.Table:
+    def to_arrow(self, *, fetch_remote_files: bool = False) -> pa.Table:
         """Return the table as a pyarrow Table.
+
+        Parameters
+        ----------
+        fetch_remote_files: bool, default False
+            If True, any values that are S3 URLs will be fetched and returned as
+            file bytes.
 
         Returns
         -------
@@ -1782,22 +1789,25 @@ class LanceTable(Table):
         """Return the first n rows of the table."""
         return LOOP.run(self._table.head(n))
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self, *, fetch_remote_files: bool = False) -> "pd.DataFrame":
         """Return the table as a pandas DataFrame.
 
         Returns
         -------
         pd.DataFrame
         """
-        return self.to_arrow().to_pandas()
+        return self.to_arrow(fetch_remote_files=fetch_remote_files).to_pandas()
 
-    def to_arrow(self) -> pa.Table:
+    def to_arrow(self, *, fetch_remote_files: bool = False) -> pa.Table:
         """Return the table as a pyarrow Table.
 
         Returns
         -------
         pa.Table"""
-        return LOOP.run(self._table.to_arrow())
+        tbl = LOOP.run(self._table.to_arrow())
+        if fetch_remote_files:
+            tbl = fetch_remote_files_util(tbl)
+        return tbl
 
     def to_polars(self, batch_size=None) -> "pl.LazyFrame":
         """Return the table as a polars LazyFrame.
@@ -3122,23 +3132,26 @@ class AsyncTable:
         """
         return AsyncQuery(self._inner.query())
 
-    async def to_pandas(self) -> "pd.DataFrame":
+    async def to_pandas(self, *, fetch_remote_files: bool = False) -> "pd.DataFrame":
         """Return the table as a pandas DataFrame.
 
         Returns
         -------
         pd.DataFrame
         """
-        return (await self.to_arrow()).to_pandas()
+        return (await self.to_arrow(fetch_remote_files=fetch_remote_files)).to_pandas()
 
-    async def to_arrow(self) -> pa.Table:
+    async def to_arrow(self, *, fetch_remote_files: bool = False) -> pa.Table:
         """Return the table as a pyarrow Table.
 
         Returns
         -------
         pa.Table
         """
-        return await self.query().to_arrow()
+        tbl = await self.query().to_arrow()
+        if fetch_remote_files:
+            tbl = fetch_remote_files_util(tbl)
+        return tbl
 
     async def create_index(
         self,

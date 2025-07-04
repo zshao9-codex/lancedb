@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import urllib.error
+from urllib.parse import urlparse
 import weakref
 import logging
 from functools import wraps
@@ -18,7 +19,7 @@ import numpy as np
 import pyarrow as pa
 
 from ..dependencies import pandas as pd
-from ..util import attempt_import_or_raise
+from ..util import attempt_import_or_raise, fs_from_uri
 
 
 # ruff: noqa: PERF203
@@ -266,6 +267,11 @@ def url_retrieve(url: str):
     url: str
         URL to download from
     """
+    parsed = urlparse(url)
+    if parsed.scheme == "s3":
+        fs, path = fs_from_uri(url)
+        with fs.open_input_file(path) as f:
+            return f.read()
     try:
         with urllib.request.urlopen(url) as conn:
             return conn.read()
