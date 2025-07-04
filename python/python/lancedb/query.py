@@ -35,7 +35,7 @@ from .dependencies import pandas as pd
 from .rerankers.base import Reranker
 from .rerankers.rrf import RRFReranker
 from .rerankers.util import check_reranker_result
-from .util import flatten_columns
+from .util import flatten_columns, fetch_remote_files as fetch_remote_files_util
 
 from typing_extensions import Annotated
 
@@ -668,6 +668,7 @@ class LanceQueryBuilder(ABC):
         flatten: Optional[Union[int, bool]] = None,
         *,
         timeout: Optional[timedelta] = None,
+        fetch_remote_files: bool = False,
     ) -> "pd.DataFrame":
         """
         Execute the query and return the results as a pandas DataFrame.
@@ -686,11 +687,19 @@ class LanceQueryBuilder(ABC):
             The maximum time to wait for the query to complete.
             If None, wait indefinitely.
         """
-        tbl = flatten_columns(self.to_arrow(timeout=timeout), flatten)
+        tbl = flatten_columns(
+            self.to_arrow(timeout=timeout, fetch_remote_files=fetch_remote_files),
+            flatten,
+        )
         return tbl.to_pandas()
 
     @abstractmethod
-    def to_arrow(self, *, timeout: Optional[timedelta] = None) -> pa.Table:
+    def to_arrow(
+        self,
+        *,
+        timeout: Optional[timedelta] = None,
+        fetch_remote_files: bool = False,
+    ) -> pa.Table:
         """
         Execute the query and return the results as an
         [Apache Arrow Table](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html#pyarrow.Table).
@@ -704,6 +713,9 @@ class LanceQueryBuilder(ABC):
         timeout: Optional[timedelta]
             The maximum time to wait for the query to complete.
             If None, wait indefinitely.
+        fetch_remote_files: bool, default False
+            If True, S3 URLs in the results will be fetched and returned as
+            binary data.
         """
         raise NotImplementedError
 
@@ -729,7 +741,12 @@ class LanceQueryBuilder(ABC):
         """
         raise NotImplementedError
 
-    def to_list(self, *, timeout: Optional[timedelta] = None) -> List[dict]:
+    def to_list(
+        self,
+        *,
+        timeout: Optional[timedelta] = None,
+        fetch_remote_files: bool = False,
+    ) -> List[dict]:
         """
         Execute the query and return the results as a list of dictionaries.
 
@@ -743,7 +760,9 @@ class LanceQueryBuilder(ABC):
             The maximum time to wait for the query to complete.
             If None, wait indefinitely.
         """
-        return self.to_arrow(timeout=timeout).to_pylist()
+        return self.to_arrow(
+            timeout=timeout, fetch_remote_files=fetch_remote_files
+        ).to_pylist()
 
     def to_pydantic(
         self, model: Type[LanceModel], *, timeout: Optional[timedelta] = None
@@ -1231,7 +1250,12 @@ class LanceVectorQueryBuilder(LanceQueryBuilder):
         self._refine_factor = refine_factor
         return self
 
-    def to_arrow(self, *, timeout: Optional[timedelta] = None) -> pa.Table:
+    def to_arrow(
+        self,
+        *,
+        timeout: Optional[timedelta] = None,
+        fetch_remote_files: bool = False,
+    ) -> pa.Table:
         """
         Execute the query and return the results as an
         [Apache Arrow Table](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html#pyarrow.Table).
@@ -1246,7 +1270,10 @@ class LanceVectorQueryBuilder(LanceQueryBuilder):
             The maximum time to wait for the query to complete.
             If None, wait indefinitely.
         """
-        return self.to_batches(timeout=timeout).read_all()
+        tbl = self.to_batches(timeout=timeout).read_all()
+        if fetch_remote_files:
+            tbl = fetch_remote_files_util(tbl)
+        return tbl
 
     def to_query_object(self) -> Query:
         """
@@ -1444,7 +1471,12 @@ class LanceFtsQueryBuilder(LanceQueryBuilder):
             offset=self._offset,
         )
 
-    def to_arrow(self, *, timeout: Optional[timedelta] = None) -> pa.Table:
+    def to_arrow(
+        self,
+        *,
+        timeout: Optional[timedelta] = None,
+        fetch_remote_files: bool = False,
+    ) -> pa.Table:
         path, fs, exist = self._table._get_fts_index_path()
         if exist:
             return self.tantivy_to_arrow()
@@ -1464,6 +1496,8 @@ class LanceFtsQueryBuilder(LanceQueryBuilder):
         if self._reranker is not None:
             results = self._reranker.rerank_fts(self._query, results)
             check_reranker_result(results)
+        if fetch_remote_files:
+            results = fetch_remote_files_util(results)
         return results
 
     def to_batches(
@@ -1573,8 +1607,16 @@ class LanceFtsQueryBuilder(LanceQueryBuilder):
 
 
 class LanceEmptyQueryBuilder(LanceQueryBuilder):
-    def to_arrow(self, *, timeout: Optional[timedelta] = None) -> pa.Table:
-        return self.to_batches(timeout=timeout).read_all()
+    def to_arrow(
+        self,
+        *,
+        timeout: Optional[timedelta] = None,
+        fetch_remote_files: bool = False,
+    ) -> pa.Table:
+        tbl = self.to_batches(timeout=timeout).read_all()
+        if fetch_remote_files:
+            tbl = fetch_remote_files_util(tbl)
+        return tbl
 
     def to_query_object(self) -> Query:
         return Query(
@@ -1680,7 +1722,12 @@ class LanceHybridQueryBuilder(LanceQueryBuilder):
     def to_query_object(self) -> Query:
         raise NotImplementedError("to_query_object not yet supported on a hybrid query")
 
-    def to_arrow(self, *, timeout: Optional[timedelta] = None) -> pa.Table:
+    def to_arrow(
+        self,
+        *,
+        timeout: Optional[timedelta] = None,
+        fetch_remote_files: bool = False,
+    ) -> pa.Table:
         self._create_query_builders()
         with ThreadPoolExecutor() as executor:
             fts_future = executor.submit(
@@ -1692,7 +1739,7 @@ class LanceHybridQueryBuilder(LanceQueryBuilder):
             fts_results = fts_future.result()
             vector_results = vector_future.result()
 
-        return self._combine_hybrid_results(
+        result = self._combine_hybrid_results(
             fts_results=fts_results,
             vector_results=vector_results,
             norm=self._norm,
@@ -1701,6 +1748,9 @@ class LanceHybridQueryBuilder(LanceQueryBuilder):
             limit=self._limit,
             with_row_ids=self._with_row_id,
         )
+        if fetch_remote_files:
+            result = fetch_remote_files_util(result)
+        return result
 
     @staticmethod
     def _combine_hybrid_results(
@@ -2290,7 +2340,12 @@ class AsyncQueryBase(object):
             await self._inner.execute(max_batch_length, timeout)
         )
 
-    async def to_arrow(self, timeout: Optional[timedelta] = None) -> pa.Table:
+    async def to_arrow(
+        self,
+        timeout: Optional[timedelta] = None,
+        *,
+        fetch_remote_files: bool = False,
+    ) -> pa.Table:
         """
         Execute the query and collect the results into an Apache Arrow Table.
 
@@ -2306,11 +2361,16 @@ class AsyncQueryBase(object):
             complete within the specified time, an error will be raised.
         """
         batch_iter = await self.to_batches(timeout=timeout)
-        return pa.Table.from_batches(
+        tbl = pa.Table.from_batches(
             await batch_iter.read_all(), schema=batch_iter.schema
         )
+        if fetch_remote_files:
+            tbl = fetch_remote_files_util(tbl)
+        return tbl
 
-    async def to_list(self, timeout: Optional[timedelta] = None) -> List[dict]:
+    async def to_list(
+        self, timeout: Optional[timedelta] = None, *, fetch_remote_files: bool = False
+    ) -> List[dict]:
         """
         Execute the query and return the results as a list of dictionaries.
 
@@ -2325,12 +2385,16 @@ class AsyncQueryBase(object):
             If not specified, no timeout is applied. If the query does not
             complete within the specified time, an error will be raised.
         """
-        return (await self.to_arrow(timeout=timeout)).to_pylist()
+        return (
+            await self.to_arrow(timeout=timeout, fetch_remote_files=fetch_remote_files)
+        ).to_pylist()
 
     async def to_pandas(
         self,
         flatten: Optional[Union[int, bool]] = None,
         timeout: Optional[timedelta] = None,
+        *,
+        fetch_remote_files: bool = False,
     ) -> "pd.DataFrame":
         """
         Execute the query and collect the results into a pandas DataFrame.
@@ -2364,9 +2428,10 @@ class AsyncQueryBase(object):
             If not specified, no timeout is applied. If the query does not
             complete within the specified time, an error will be raised.
         """
-        return (
-            flatten_columns(await self.to_arrow(timeout=timeout), flatten)
-        ).to_pandas()
+        tbl = await self.to_arrow(
+            timeout=timeout, fetch_remote_files=fetch_remote_files
+        )
+        return flatten_columns(tbl, flatten).to_pandas()
 
     async def to_polars(
         self,

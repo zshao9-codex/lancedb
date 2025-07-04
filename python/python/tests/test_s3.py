@@ -269,6 +269,25 @@ def test_s3_dynamodb_drop_all_tables(s3_bucket: str, commit_table: str, monkeypa
 
     # dropping all tables should clear multiple tables
     db.drop_all_tables()
+
+
+@pytest.mark.s3_test
+def test_fetch_external_images(s3_bucket: str, monkeypatch):
+    for key, value in CONFIG.items():
+        monkeypatch.setenv(key.upper(), value)
+
+    s3 = get_boto3_client("s3", endpoint_url=CONFIG["aws_endpoint"])
+    key = "img/test.jpg"
+    data = b"hello"
+    s3.put_object(Bucket=s3_bucket, Key=key, Body=data)
+
+    uri = f"s3://{s3_bucket}/ext_img"
+    db = lancedb.connect(uri, storage_options=CONFIG)
+    table = db.create_table("images", pa.table({"url": [f"s3://{s3_bucket}/{key}"]}))
+
+    tbl = table.to_arrow(fetch_remote_files=True)
+    assert tbl.schema.field("url").type == pa.binary()
+    assert tbl.column("url")[0].as_py() == data
     assert db.table_names() == []
 
     # create a new table with the same name to ensure DDB is clean

@@ -189,6 +189,36 @@ def flatten_columns(tbl: pa.Table, flatten: Optional[Union[int, bool]] = None):
     return tbl
 
 
+def fetch_remote_files(tbl: pa.Table) -> pa.Table:
+    """Fetch any S3 URLs in a table and replace them with file bytes."""
+    from urllib.parse import urlparse
+
+    fields = []
+    columns = []
+    for field, column in zip(tbl.schema, tbl.columns):
+        if pa.types.is_string(field.type):
+            data = []
+            has_remote = False
+            for v in column.to_pylist():
+                if isinstance(v, str) and urlparse(v).scheme == "s3":
+                    fs, path = fs_from_uri(v)
+                    with fs.open_input_file(path) as f:
+                        data.append(f.read())
+                    has_remote = True
+                else:
+                    data.append(v)
+            if has_remote:
+                fields.append(pa.field(field.name, pa.binary()))
+                columns.append(pa.array(data, type=pa.binary()))
+            else:
+                fields.append(field)
+                columns.append(column)
+        else:
+            fields.append(field)
+            columns.append(column)
+    return pa.Table.from_arrays(columns, schema=pa.schema(fields))
+
+
 def inf_vector_column_query(schema: pa.Schema) -> str:
     """
     Get the vector column name
